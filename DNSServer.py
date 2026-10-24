@@ -1,4 +1,4 @@
-mport dns.message
+import dns.message
 import dns.name
 import dns.rdatatype
 import dns.rdataclass
