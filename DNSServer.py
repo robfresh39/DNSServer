@@ -1,4 +1,4 @@
-import dns.message
+mport dns.message
 import dns.name
 import dns.rdatatype
 import dns.rdataclass
@@ -35,7 +35,7 @@ def generate_aes_key(password, salt):
     return key
 
 
-# Fernet docs: https://cryptography.io/en/latest/fernet/
+# Fernet API: https://cryptography.io/en/latest/fernet/
 def encrypt_with_aes(input_string, password, salt):
     key = generate_aes_key(password, salt)
     f = Fernet(key)
@@ -55,7 +55,9 @@ password = 'rn2836@nyu.edu'
 input_string = 'AlwaysWatching'
 
 encrypted_value = encrypt_with_aes(input_string, password, salt)  # exfil function
-decrypted_value = decrypt_with_aes(encrypted_value, password, salt)  # sanity check only
+# Sanity check only, so you can confirm the round trip works locally.
+# Do NOT put the decrypted value in the DNS record.
+decrypted_value = decrypt_with_aes(encrypted_value, password, salt)  # exfil function
 
 
 # For future use
@@ -70,18 +72,18 @@ dns_records = {
     'example.com.': {
         dns.rdatatype.A: '192.168.1.101',
         dns.rdatatype.AAAA: '2001:0db8:85a3:0000:0000:8a2e:0370:7334',
-        dns.rdatatype.MX: [(10, 'mail.example.com.')],
+        dns.rdatatype.MX: [(10, 'mail.example.com.')],  # List of (preference, mail server) tuples
         dns.rdatatype.CNAME: 'www.example.com.',
         dns.rdatatype.NS: 'ns.example.com.',
         dns.rdatatype.TXT: ('This is a TXT record',),
         dns.rdatatype.SOA: (
-            'ns1.example.com.',   # mname
-            'admin.example.com.', # rname
-            2023081401,           # serial
-            3600,                 # refresh
-            1800,                 # retry
-            604800,               # expire
-            86400,                # minimum
+            'ns1.example.com.',  # mname
+            'admin.example.com.',  # rname
+            2023081401,  # serial
+            3600,  # refresh
+            1800,  # retry
+            604800,  # expire
+            86400,  # minimum
         ),
     },
 
@@ -103,51 +105,19 @@ dns_records = {
 
     'nyu.edu.': {
         dns.rdatatype.A: '192.168.1.106',
-        # TXT holds the encrypted token as a string
+        # TXT is a string-cast version of the encrypted secret data
         dns.rdatatype.TXT: (encrypted_value.decode('utf-8'),),
         dns.rdatatype.MX: [(10, 'mxa-00256a01.gslb.pphosted.com.')],
-        # 2001:0db8:85a3:0000:0000:8a2e:0373:7312 compressed per RFC 5952
+        # Same address as 2001:0db8:85a3:0000:0000:8a2e:0373:7312, compressed per RFC 5952
         dns.rdatatype.AAAA: '2001:db8:85a3::8a2e:373:7312',
         dns.rdatatype.NS: 'ns1.nyu.edu.',
     },
 }
 
 
-def build_rdata_list(qtype, answer_data):
-    """Turn a dns_records entry into a list of dnspython rdata objects."""
-    rdata_list = []
-
-    if qtype == dns.rdatatype.MX:
-        for pref, server in answer_data:
-            rdata_list.append(
-                MX(dns.rdataclass.IN, dns.rdatatype.MX, pref, dns.name.from_text(server))
-            )
-
-    elif qtype == dns.rdatatype.SOA:
-        # Format: (mname, rname, serial, refresh, retry, expire, minimum)
-        mname, rname, serial, refresh, retry, expire, minimum = answer_data
-        rdata_list.append(
-            SOA(dns.rdataclass.IN, dns.rdatatype.SOA,
-                dns.name.from_text(mname), dns.name.from_text(rname),
-                serial, refresh, retry, expire, minimum)
-        )
-
-    elif qtype == dns.rdatatype.TXT:
-        # Build TXT rdata from raw bytes so the token is stored exactly as encrypted
-        strings = [s.encode('utf-8') for s in answer_data]
-        rdata_list.append(TXT(dns.rdataclass.IN, dns.rdatatype.TXT, strings))
-
-    else:
-        if isinstance(answer_data, str):
-            rdata_list = [dns.rdata.from_text(dns.rdataclass.IN, qtype, answer_data)]
-        else:
-            rdata_list = [dns.rdata.from_text(dns.rdataclass.IN, qtype, d) for d in answer_data]
-
-    return rdata_list
-
-
 def run_dns_server():
-    # Bind to localhost on the standard DNS port (port 53 needs sudo/root)
+    # Bind to localhost on the standard DNS port.
+    # Port 53 usually needs root/sudo. If it fails, use 5353 and query with dig -p 5353.
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_socket.bind(('127.0.0.1', 53))
 
@@ -162,15 +132,41 @@ def run_dns_server():
             # Create a response based on the request
             response = dns.message.make_response(request)
 
-            # Get the first question
+            # Get the question from the request
             question = request.question[0]
             qname = question.name.to_text()
             qtype = question.rdtype
 
-            # Look up the record and add it to the answer section
+            # Check if there is a record that matches the question
             if qname in dns_records and qtype in dns_records[qname]:
                 answer_data = dns_records[qname][qtype]
-                rdata_list = build_rdata_list(qtype, answer_data)
+                rdata_list = []
+
+                if qtype == dns.rdatatype.MX:
+                    for pref, server in answer_data:
+                        rdata_list.append(
+                            MX(dns.rdataclass.IN, dns.rdatatype.MX, pref, dns.name.from_text(server))
+                        )
+
+                elif qtype == dns.rdatatype.SOA:
+                    # Format: (mname, rname, serial, refresh, retry, expire, minimum)
+                    mname, rname, serial, refresh, retry, expire, minimum = answer_data
+                    rdata_list.append(
+                        SOA(dns.rdataclass.IN, dns.rdatatype.SOA,
+                            dns.name.from_text(mname), dns.name.from_text(rname),
+                            serial, refresh, retry, expire, minimum)
+                    )
+
+                elif qtype == dns.rdatatype.TXT:
+                    # Build the TXT rdata directly so the encrypted string is stored as-is
+                    strings = [s.encode('utf-8') for s in answer_data]
+                    rdata_list.append(TXT(dns.rdataclass.IN, dns.rdatatype.TXT, strings))
+
+                else:
+                    if isinstance(answer_data, str):
+                        rdata_list = [dns.rdata.from_text(dns.rdataclass.IN, qtype, answer_data)]
+                    else:
+                        rdata_list = [dns.rdata.from_text(dns.rdataclass.IN, qtype, d) for d in answer_data]
 
                 for rdata in rdata_list:
                     response.answer.append(dns.rrset.RRset(question.name, dns.rdataclass.IN, qtype))
@@ -182,14 +178,10 @@ def run_dns_server():
             # Send the response back to the client
             print("Responding to request:", qname)
             server_socket.sendto(response.to_wire(), addr)
-
         except KeyboardInterrupt:
             print('\nExiting...')
             server_socket.close()
             sys.exit(0)
-        except Exception as e:
-            # Keep serving if one query is malformed or fails to build
-            print("Error handling request:", type(e).__name__, e)
 
 
 def run_dns_server_user():
